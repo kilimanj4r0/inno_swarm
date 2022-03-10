@@ -18,3 +18,13 @@ def start_daemon_thread(*args, **kwargs):
     t.daemon = True
     t.start()
     return t
+
+
+def rotate_vect(a, rot):
+    rotate = np.array([[np.cos(-rot), -np.sin(-rot)],
+                       [np.sin(-rot), np.cos(-rot)]])
+
+    pos = np.array([[a[0]],
+                    [a[1]]])
+    val = np.dot(rotate, pos)
+    return np.array([val[0][0], val[1][0], a[2]])

@@ -1,23 +1,30 @@
+import math
+from typing import List
+
 import rospy
 from inno_swarm.msg import SpeedPoseStamped  # message for position/speed of a drone
 from geometry_msgs.msg import PoseStamped, Point  # message for position/orientation of a drone
 from mavros_msgs.srv import SetMode
 import numpy as np
 
-from src.utils import numpyfy, pointify, start_daemon_thread
+from src.utils import numpyfy, pointify, start_daemon_thread, rotate_vect
 
-n = 6  # number of drones
-RADIUS = 1.0  # radius of safe sphere zone of a drone
+n = 2  # number of drones
+RADIUS = 1.2  # radius of safe sphere zone of a drone
 DRONE_TAG = 'mavros'
-
+FORCE_REPEL = 0.8  # coefficient of repel
+PADDING_ANGLE = -20  # angle in degrees to rotate drone
 
 class Drone:
+    drones = []
+
     def __init__(self, name: str):
         # VECTOR: nav_start --- nav_target >
-        self.nav_start: PoseStamped = PoseStamped()  # initial (start) point of a drone
+        current_pos: PoseStamped = rospy.wait_for_message(f"/{name}/local_position/pose", PoseStamped)
+        self.nav_start: PoseStamped = current_pos  # initial (start) point of a drone
         self.nav_target: SpeedPoseStamped = SpeedPoseStamped()  # most last point where drone should move
-        self.current_pos: PoseStamped = PoseStamped()  # current drone position
-        self.setpoint: PoseStamped = PoseStamped()  # the (medium) position where drone should move (ds)
+        self.current_pos: PoseStamped = current_pos  # current drone position
+        self.setpoint: PoseStamped = current_pos  # the (medium) position where drone should move (ds)
 
         self.name = name  # drone name
         self.formation_offset: Point = pointify([0, 0, 0])  # offset from formation center
@@ -30,6 +37,8 @@ class Drone:
 
         start_daemon_thread(target=self._pos_publishing)
         start_daemon_thread(target=self._t_interpolate)
+
+        self.drones.append(self)
 
     def _pos_publishing(self):
         r = rospy.Rate(10)
@@ -47,10 +56,22 @@ class Drone:
         r = rospy.Rate(10)
         while not rospy.is_shutdown():
             if self.nav_target.speed:
-                self.interpolate()
+                inter = self.interpolate()
+                repel = self.repel_from_object()
+                print(self.name, inter, repel)
+
+                to = PoseStamped()
+                to.header.stamp = rospy.Time.now()
+                to.pose.position = pointify(inter - repel)
+                to.pose.orientation.x = 0.0
+                to.pose.orientation.y = 0.0
+                to.pose.orientation.z = 0.0
+                to.pose.orientation.w = 0.0
+
+                self.setpoint = to
             r.sleep()
 
-    def interpolate(self):
+    def interpolate(self) -> np.ndarray:
         start = numpyfy(self.nav_start.pose.position)
         target = numpyfy(self.nav_target.position)
         speed = self.nav_target.speed
@@ -58,16 +79,10 @@ class Drone:
         distance = np.linalg.norm(target - start)
         time = distance / speed
         passed = min((rospy.get_time() - self.nav_start.header.stamp.to_sec()) / time, 1.0)  # percents
-        print(start, target, passed)
+        # print(start, target, passed)
 
-        to = PoseStamped()
-        to.header.stamp = rospy.Time.now()
-        to.pose.position = pointify(start + (target - start) * passed)
-        to.pose.orientation.x = 0.0
-        to.pose.orientation.y = 0.0
-        to.pose.orientation.z = 0.0
-        to.pose.orientation.w = 0.0
-        self.setpoint = to
+        r = start + (target - start) * passed
+        return r
 
     def cb(self, speed_pose: SpeedPoseStamped):
         if self.setpoint.pose:
@@ -76,11 +91,51 @@ class Drone:
             self.nav_start = self.current_pos
         self.nav_target = speed_pose
 
+    def repel_from_object(self):
+        repel_vec = np.array([0.0, 0.0, 0.0])
+
+        course_vec = numpyfy(self.nav_target.position) - numpyfy(self.setpoint.pose.position)
+        course = math.atan2(course_vec[1], course_vec[0])
+
+        for drone in self.drones:
+            if drone != self:
+                self_pos = numpyfy(self.current_pos.pose.position)
+                other_pos = numpyfy(drone.current_pos.pose.position)
+                # print(self_pos, other_pos)
+                vec = other_pos - self_pos
+                dist = np.linalg.norm(vec)
+                # print(vec, dist)
+                if dist < RADIUS:
+                    direction = 1.0 if abs(course) <= np.deg2rad(90) else -1.0
+                    repel_force = FORCE_REPEL / dist - FORCE_REPEL / RADIUS
+                    # print(vec, repel_force)
+                    repel_force_vec = np.array([repel_force, repel_force, 0])
+
+                    repel_vec += vec * repel_force_vec
+
+        # print(self.name, repel_vec)
+        repel_vec = rotate_vect(repel_vec, np.deg2rad(PADDING_ANGLE))
+
+        return repel_vec
+                # if vec[2] == 0.:
+                #     repel[2] += max_vel * rep_force(dist) * dir
+                # else:
+                #     repel[2] += vec[2] * rep_force(dist) * dir
+
+
+# class Swarm:
+#     def __init__(self, drones: List[Drone]):
+#         self.drones = drones
+#
+#     def repel_from_object(self):
+#         for drone in self.drones:
+#
+#
 
 rospy.init_node("position_proxy")
 
-drones = [Drone(f'{DRONE_TAG}{i}') for i in range(1, n + 1)]
 
 
 if __name__ == "__main__":
+    drones = [Drone(f'{DRONE_TAG}{i}') for i in range(1, n + 1)]
     rospy.spin()
